@@ -26,16 +26,37 @@ DEBUG = True
 UTC_OFFSET = 3   # hours of differenc between UTC and local (Jerusalem) time
 COMMANDS_PORT = 5641  # port at RPi to send commands
 RPi_HOST = "10.0.0.17"
+
+
 CARBON_MONOXIDE_ADC_THRESH = 300
-TEMPERATURE_LOG_DELAY = 5*60    # minimal number of seconds to wait/
-                            # between subsequent temperature/humidity Logging
-TEMPERATURE_SAMPLE_DELAY = 5
+
+
+#Logging constants
+LOG_DELAY = 5*60    # minimal number of seconds to wait/
+                            # between subsequent sensor Logging
+SAMPLE_DELAY = 2
 MOTION_LOG_DELAY = 5*60   # minimal number of seconds to wait/
                             # between subsequent motion Logging
 
 
+#Define MQTT topics:
+TEMPERATURE_CHIPA = "/sensor/Chipa/temperature"
+HUMIDITY_CHIPA = "/sensor/Chipa/humidity"
+MOVEMENT_CHIPA = "/sensor/Chipa/motion"
+CARBON_MONOXIDE_CHIPA = "/sensor/Chipa/CO"
+SOUND_LEVEL_CHIPA = "/sensor/Chipa/sound"
+
+
 clientID =  b"chipa_ESP8266"
 localBroker = RPi_HOST
+
+
+#global variable, change only in the appropriate function
+lastCOLogTime = 0
+motionDetected = False
+lastMotionTime = 0
+lastMotionLogTime = 0
+lastTemperatureLogTime = 0
 
 
 def toggleGPIO(p):
@@ -113,29 +134,40 @@ def pin_interrupt():
     motionDetected = True
 
 
-def handleDHT(temper, humid):
+def handleDHT(temper, humid,currentTime):
     global lastTemperatureLogTime
-    currentTime = utime.time()
     print ("Temperature[degC]: ", temper, ", Humidity[%]: ", humid, 
            "time[s]: ", currentTime)
     if (lastTemperatureLogTime == 0) or \
-            currentTime - lastTemperatureLogTime > TEMPERATURE_LOG_DELAY:
+            currentTime - lastTemperatureLogTime > LOG_DELAY:
         print ("LOGGING temperature and humidity at: ", currentTime)
         lastTemperatureLogTime = currentTime
-        pushSample(temper,"/sensor/Chipa/temperature")
-        pushSample(humid,"/sensor/Chipa/humidity")
+        pushSample(temper,TEMPERATURE_CHIPA)
+        pushSample(humid,HUMIDITY_CHIPA)
 
 
-def handlePIR():
+def handlePIR(currentTime):
     global lastMotionTime, lastMotionLogTime
-    currentTime = utime.time()
     print ("Movement detected at: ", lastMotionTime)
     if (lastMotionLogTime == 0) or \
-            (currentTime - lastMotionLogTime) > MOTION_LOG_DELAY:
+            (currentTime - lastMotionLogTime) > LOG_DELAY:
         print ("LOGGING motion at: ", currentTime)
         lastMotionLogTime = currentTime
         if not DEBUG:
             pushSample(lastMotionTime, "/sensor/Chipa/motion")
+
+def handleCO(gasA0,gasDetected,currentTime):
+    global lastCOLogTime
+    print("Analog gas value: ",gasA0, " digital gas threshold value: ", gasDetected)
+    alert = gasA0 > CARBON_MONOXIDE_ADC_THRESH
+    if alert:
+        print("ALERT!!!!! CARBON MONOXIDE LEVEL ABOVE THRESHOLD")
+
+    if alert or (lastCOLogTime == 0) or \
+            (currentTime - lastCOLogTime) > LOG_DELAY:
+        print ("LOGGING Carbon Monoxidde at: ", currentTime)
+        lastCOLogTime = currentTime
+        pushSample(gasA0,CARBON_MONOXIDE_CHIPA)
 
 
 def pushSample(sample, topic):
@@ -166,11 +198,7 @@ rtc = machine.RTC()
 #sta_if = network.WLAN(network.STA_IF)
 eth_if = inetConnect()
 
-motionDetected = False
-lastMotionTime = 0
-lastMotionLogTime = 0
 
-lastTemperatureLogTime = 0
 dhtSensor = DHT11(machine.Pin(4))  # D2 pin on NodeMCU board. DHT signal pin
 pirSig = machine.Pin(5, machine.Pin.IN)          # D1 pin on NodeMCU. PIR signal pin
 pirSig.irq(handler=lambda p: pin_interrupt(), trigger=machine.Pin.IRQ_RISING)
@@ -179,7 +207,7 @@ pirSig.irq(handler=lambda p: pin_interrupt(), trigger=machine.Pin.IRQ_RISING)
 #MISO is GPIO12(D6), MOSI is GPIO13(D7), and SCK is GPIO14(D5)
 ###hspi = machine.SPI(1, baudrate=40000000, polarity=0, phase=0)
 
-#Gas sensor
+#Carbon Monoxide sensor
 #Init ADC
 adc = machine.ADC(0)
 #Threshold pin
@@ -210,13 +238,19 @@ while True:
 
     else:
         #gotTime, curr_tm = getDateTime()  # get time 
-        utime.sleep(TEMPERATURE_SAMPLE_DELAY)  # Sleep at least one second between each measurement
+        utime.sleep(SAMPLE_DELAY)  # Sleep at least one second between each measurement
+        currentTime = utime.time()
 
         # sample the temperature and humidity sensor
         temper, humid = getHumidityTemp()
-        handleDHT(temper, humid)
+        handleDHT(temper, humid,currentTime)
+        
+        #sample carbon monoxide
+        gasA0 = adc.read()
+        gasDetected = gasD0.value() == 1
+        handleCO(gasA0,gasDetected,currentTime)
 
         # if detected motion on PIR sensor
         if motionDetected:   
             motionDetected = False
-            handlePIR()
+            handlePIR(currentTime)
